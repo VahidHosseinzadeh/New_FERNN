@@ -82,7 +82,7 @@ def main():
         image_size=args.image_size,
         velocity_range_x=(-args.data_v_range,args.data_v_range),
         velocity_range_y=(-args.data_v_range,args.data_v_range),
-        num_digits=2
+        num_digits=1
     )
     
     test_dataset = MovingMNISTDataset(
@@ -92,7 +92,7 @@ def main():
         image_size=args.image_size,
         velocity_range_x=(-args.data_v_range,args.data_v_range),
         velocity_range_y=(-args.data_v_range,args.data_v_range),
-        num_digits=2
+        num_digits=1
     )
 
     gen_test_dataset = MovingMNISTDataset(
@@ -102,7 +102,7 @@ def main():
             image_size=args.image_size,
             velocity_range_x=(-args.data_v_range, args.data_v_range),
             velocity_range_y=(-args.data_v_range, args.data_v_range),
-            num_digits=2,
+            num_digits=1,
             random=False
     )
 
