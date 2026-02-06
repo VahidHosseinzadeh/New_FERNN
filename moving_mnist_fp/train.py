@@ -165,7 +165,6 @@ def main():
                 h_kernel_size=args.kernel_size,
                 u_kernel_size=args.kernel_size,
                 v_range=args.v_range,
-                pool_type='max',
                 decoder_conv_layers=args.decoder_conv_layers
             ).to(device)
     elif args.model == "grnn":
@@ -178,7 +177,6 @@ def main():
                 h_kernel_size=args.kernel_size,
                 u_kernel_size=args.kernel_size,
                 v_range=0,
-                pool_type='max',
                 decoder_conv_layers=args.decoder_conv_layers
             ).to(device)
 
