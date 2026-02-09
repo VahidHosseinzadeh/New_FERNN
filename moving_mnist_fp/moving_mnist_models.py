@@ -224,50 +224,47 @@ class Seq2SeqFERNN(nn.Module):
         # Important: velocity is computed ONLY from GT target_seq if available.
         # Otherwise, we freeze velocity to last_probs from the encoder.
         
-
-        # Decoder
+        prev_frame = input_seq[:, -1]  
         outputs = []
-        # Step 0: first prediction comes ONLY from h_T
-        pred_frame = self.decoder(h)          # predicts f_T
-        outputs.append(pred_frame)
 
+        for t in range(pred_len):
+            if self.training and (target_seq is not None) and (torch.rand(1).item() < teacher_forcing_ratio):
+                current_frame = target_seq[:, t]
+            else:
+                current_frame = prev_frame.detach()
 
-
-        # Initialize current_frame for the loop
-        if(self.training and target_seq is not None):
-            current_frame = target_seq[:, 0]
-        else:
-            current_frame = pred_frame.detach()
-
-        for t in range(1, pred_len):
-            # # Compute velocity probs
+            # # -------------------------                  
+            # # Choose velocity probs
+            # # -------------------------
             # if target_seq is not None:
-            #     # Use GT to compute velocity
-            #     if t == 1:
+            #     # Use ground truth to compute velocity (no drift)
+            #     if t == 0:
+            #         # first predicted step: compare target_seq[0] to last input frame
             #         f_prev_for_vel = input_seq[:, -1]
             #         f_curr_for_vel = target_seq[:, 0]
             #     else:
-            #         f_prev_for_vel = target_seq[:, t - 2]
-            #         f_curr_for_vel = target_seq[:, t - 1]
-                
+            #         # later: compare target_seq[t] to target_seq[t-1]
+            #         f_prev_for_vel = target_seq[:, t - 1]
+            #         f_curr_for_vel = target_seq[:, t]
+
             #     with torch.no_grad():
             #         probs = self.velocity_predictor(f_curr_for_vel, f_prev_for_vel)
+
             # else:
-            #     # Inference: freeze velocity
+            #     # Inference: no GT available -> freeze velocity
             #     probs = last_probs
 
-            # Update hidden state
-            h = self.cell(current_frame, h, probs=last_probs)
 
-            # Decode next frame
-            pred_frame = self.decoder(h)
-            outputs.append(pred_frame)
+            h = self.cell(
+                current_frame, h,
+                probs= last_probs
+            )
 
-            # Choose next input frame
-            if(self.training and target_seq is not None and torch.rand(1, device=h.device).item() < teacher_forcing_ratio):
-                current_frame = target_seq[:, t]
-            else:
-                current_frame = pred_frame.detach()
+            pred = self.decoder(h)
+            outputs.append(pred)
+
+            prev_frame = pred  # for autoregressive input
+
 
         outputs_seq = torch.stack(outputs, dim=1)  # (B, pred_len, C, H, W)
 
@@ -421,109 +418,143 @@ class Seq2SeqFERNN(nn.Module):
 
 
 
-# # -------------------------
-# # Decoder (the version when we first decode and there is no lag)
-# # -------------------------
-# h = h_enc  # this is h_T after encoder
-# outputs = []
 
-# # Step 0: first prediction comes ONLY from h_T
-# pred_frame = self.decoder(h)          # predicts f_T
-# outputs.append(pred_frame)
+# class Seq2SeqFERNNWorkingWithProblemInTheFirstPred(nn.Module):
 
-# # Now decide what frame to feed to update hidden state
-# if (self.training and target_seq is not None and
-#     torch.rand(1, device=pred_frame.device).item() < teacher_forcing_ratio):
-#     current_frame = target_seq[:, 0]   # f_T
-# else:
-#     current_frame = pred_frame         # \hat f_T
-
-# # Now we run the remaining steps
-# for t in range(1, pred_len):
-#     # update hidden using the last chosen frame
-#     h = self.cell(
-#         x=current_frame,
-#         h=h,
-#         probs=probs
-#     )
-
-#     # decode next frame
-#     pred_frame = self.decoder(h)       # predicts f_{T+t}
-#     outputs.append(pred_frame)
-
-#     # teacher forcing for next step
-#     if (self.training and target_seq is not None and
-#         torch.rand(1, device=pred_frame.device).item() < teacher_forcing_ratio):
-#         current_frame = target_seq[:, t]
-#     else:
-#         current_frame = pred_frame
-
-# output_seq = torch.stack(outputs, dim=1)  # (B, pred_len, C, H, W)
-# return output_seq
+#     def __init__(self, input_channels, hidden_channels, height, width,
+#                  output_channels=None, h_kernel_size=3, u_kernel_size=3,
+#                  v_range=2, decoder_conv_layers=1,smooth_vel_probs=0.001):
+#         super().__init__()
+#         self.height = height
+#         self.width = width
+#         self.output_channels = output_channels or input_channels
+#         # velocity predictor 
+#         self.velocity_predictor = DiffLucasKanade(v_range=v_range, smooth=smooth_vel_probs)
+        
+        
+        
+#         # FERNN Cell
+#         self.cell = FERNN_Cell(
+#             input_channels, hidden_channels,
+#             h_kernel_size, u_kernel_size, v_range
+#         )
 
 
 
-# decoder version with lag.  the one that update the hidden state first. 
-        # # Decoder
-        # # Important: velocity is computed ONLY from GT target_seq if available.
-        # # Otherwise, we freeze velocity to last_probs from the encoder.
-        # prev_frame = input_seq[:, -1]  # last observed frame (GT)
-        # predictions = []
 
-        # for t in range(pred_len):
+#         # Decoder building
+#         decoder_layers = []
+#         for _ in range(decoder_conv_layers):
+#             decoder_layers.extend([
+#                 nn.Conv2d(hidden_channels, hidden_channels, 3,
+#                          padding=1, padding_mode='circular', bias=False),
+#                 nn.ReLU()
+#             ])
+#         decoder_layers.append(
+#             nn.Conv2d(hidden_channels, self.output_channels, 3,
+#                      padding=1, padding_mode='circular', bias=False)
+#         )
+#         self.decoder = nn.Sequential(*decoder_layers)
 
-        #     # -------------------------
-        #     # Choose the RNN input frame
-        #     # -------------------------
-        #     if self.training and (target_seq is not None) and (torch.rand(1).item() < teacher_forcing_ratio):
-        #         # teacher forcing for the RNN input
-        #         current_frame = target_seq[:, t]
-        #     else:
-        #         # autoregressive input
-        #         current_frame = prev_frame.detach()
 
-        #     # -------------------------
-        #     # Choose velocity probs
-        #     # -------------------------
-        #     if target_seq is not None:
-        #         # Use ground truth to compute velocity (no drift)
-        #         if t == 0:
-        #             # first predicted step: compare target_seq[0] to last input frame
-        #             f_prev_for_vel = input_seq[:, -1]
-        #             f_curr_for_vel = target_seq[:, 0]
-        #         else:
-        #             # later: compare target_seq[t] to target_seq[t-1]
-        #             f_prev_for_vel = target_seq[:, t - 1]
-        #             f_curr_for_vel = target_seq[:, t]
+#     def forward(self, input_seq, pred_len, teacher_forcing_ratio=0.0,
+#                 target_seq=None, return_vel_probs=False):
+        
+#         B, T_in, C, H, W = input_seq.shape
+#         device = input_seq.device
+#         dtype = input_seq.dtype
 
-        #         with torch.no_grad():
-        #             probs = self.velocity_predictor(f_curr_for_vel, f_prev_for_vel)
+#         h = torch.zeros(
+#             B, self.cell.hidden_channels, self.height, self.width,
+#             device=device, dtype=dtype
+#         )
 
-        #     else:
-        #         # Inference: no GT available -> freeze velocity
-        #         probs = last_probs
+#         vel_probs_list = []
 
-        #     # -------------------------
-        #     # Update hidden state
-        #     # -------------------------
-        #     h = self.cell(
-        #         current_frame, h,
-        #         probs=probs
-        #     )
+#         # prob =1 for zero velocity. I define it but it not necessary now because h_0 = 0 so warping does not have effect. 
+#         def zero_velocity_probs():
+#             probs0 = torch.zeros(B, self.velocity_predictor.num_v, device=device, dtype=dtype)
+#             probs0[:, self.velocity_predictor.num_v // 2] = 1.0
+#             return probs0
 
-        #     # -------------------------
-        #     # Decode prediction
-        #     # -------------------------
-        #     pred = self.decoder(h)
-        #     predictions.append(pred)
+#         # Encoder
+#         # Velocity is computed from GT pairs in input_seq
+#         last_probs = zero_velocity_probs()
 
-        #     prev_frame = pred  # for autoregressive input
+#         for t in range(T_in):
+#             f_t = input_seq[:, t]
 
-        #     if return_vel_probs:
-        #         vel_probs_list.append(probs)
+#             if t == 0:
+#                 probs = zero_velocity_probs()
+#             else:
+#                 f_t_prev = input_seq[:, t - 1]
 
-        # predictions = torch.stack(predictions, dim=1)  # (B, pred_len, C, H, W)
+#                 # here I put this in no_grad because we don't want gradients to flow through the velocity predictor. We want it to be a fixed operation that estimates velocity from GT frames, but for parametric I should change this. 
+#                 with torch.no_grad():
+#                     probs = self.velocity_predictor(f_t, f_t_prev)
 
-        # if return_vel_probs:
-        #     vel_probs = torch.stack(vel_probs_list, dim=1)  # (B, T_in + pred_len, num_v)
-        #     return predictions, vel_probs
+#             last_probs = probs  # store last encoder probs
+
+#             h = self.cell(
+#                 f_t, h,
+#                 probs=probs
+#             )
+
+#             if return_vel_probs:
+#                 vel_probs_list.append(probs)
+
+#         # Decoder
+#         # Important: velocity is computed ONLY from GT target_seq if available.
+#         # Otherwise, we freeze velocity to last_probs from the encoder.
+        
+
+#         # Decoder
+#         outputs = []
+#         # Step 0: first prediction comes ONLY from h_T
+#         pred_frame = self.decoder(h)          # predicts f_T
+#         outputs.append(pred_frame)
+
+
+
+#         # Initialize current_frame for the loop
+#         if(self.training and target_seq is not None):
+#             current_frame = target_seq[:, 0]
+#         else:
+#             current_frame = pred_frame.detach()
+
+#         for t in range(1, pred_len):
+#             # # Compute velocity probs
+#             # if target_seq is not None:
+#             #     # Use GT to compute velocity
+#             #     if t == 1:
+#             #         f_prev_for_vel = input_seq[:, -1]
+#             #         f_curr_for_vel = target_seq[:, 0]
+#             #     else:
+#             #         f_prev_for_vel = target_seq[:, t - 2]
+#             #         f_curr_for_vel = target_seq[:, t - 1]
+                
+#             #     with torch.no_grad():
+#             #         probs = self.velocity_predictor(f_curr_for_vel, f_prev_for_vel)
+#             # else:
+#             #     # Inference: freeze velocity
+#             #     probs = last_probs
+
+#             # Update hidden state
+#             h = self.cell(current_frame, h, probs=last_probs)
+
+#             # Decode next frame
+#             pred_frame = self.decoder(h)
+#             outputs.append(pred_frame)
+
+#             # Choose next input frame
+#             if(self.training and target_seq is not None and torch.rand(1, device=h.device).item() < teacher_forcing_ratio):
+#                 current_frame = target_seq[:, t]
+#             else:
+#                 current_frame = pred_frame.detach()
+
+#         outputs_seq = torch.stack(outputs, dim=1)  # (B, pred_len, C, H, W)
+
+#         if return_vel_probs:
+#             vel_probs = torch.stack(vel_probs_list, dim=1)  # (B, T_in , num_v)
+#             return outputs_seq, vel_probs
+#         return outputs_seq
