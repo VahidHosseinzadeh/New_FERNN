@@ -226,6 +226,7 @@ class Seq2SeqFERNN(nn.Module):
         
         prev_frame = input_seq[:, -1]  
         outputs = []
+        prev_pred_for_vel = None
 
         for t in range(pred_len):
             if self.training and (target_seq is not None) and (torch.rand(1).item() < teacher_forcing_ratio):
@@ -233,7 +234,7 @@ class Seq2SeqFERNN(nn.Module):
             else:
                 current_frame = prev_frame.detach()
 
-            # Compute velocity probs for the decoder part stil with GT if available
+            # Compute velocity probs for the decoder part stil with GT 
             if target_seq is not None:
                 if t == 0:
                     # first predicted step: compare target_seq[0] to last input frame
@@ -247,8 +248,13 @@ class Seq2SeqFERNN(nn.Module):
                 # as my velocity model is not parametric,  
                 with torch.no_grad():
                     probs = self.velocity_predictor(f_curr_for_vel, f_prev_for_vel)
+            # if no GT available
             else:
-                probs = last_probs
+                if t == 0 or prev_pred_for_vel is None:
+                    probs = last_probs
+                else:
+                    with torch.no_grad():
+                        probs = self.velocity_predictor(current_frame, prev_pred_for_vel)
 
             h = self.cell(
                 current_frame, h,
@@ -259,6 +265,7 @@ class Seq2SeqFERNN(nn.Module):
             outputs.append(pred)
 
             prev_frame = pred  # for autoregressive input 
+            prev_pred_for_vel = pred.detach()  
 
         outputs_seq = torch.stack(outputs, dim=1)  # (B, pred_len, C, H, W)
 
