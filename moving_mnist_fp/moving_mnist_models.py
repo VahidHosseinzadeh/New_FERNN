@@ -56,7 +56,7 @@ class DiffLucasKanade(nn.Module):
 
 class FERNN_Cell(nn.Module):
     def __init__(self, input_channels, hidden_channels,
-                 h_kernel_size=3, u_kernel_size=3, v_range=1):
+                 h_kernel_size=3, u_kernel_size=3, v_range=2):
         super().__init__()
         self.hidden_channels = hidden_channels
         self.v_list = [(x, y) for x in range(-v_range, v_range + 1) for y in range(-v_range, v_range + 1)]
@@ -78,7 +78,7 @@ class FERNN_Cell(nn.Module):
 
 
 
-    def warp(self, h, probs):
+    def warp(self, h, probs, use_argmax=False):
         """
         Differentiable flow (continuous): compute expected (dy, dx) and warp once.
         Uses circular (wrap-around) behavior in pixel space.
@@ -86,8 +86,14 @@ class FERNN_Cell(nn.Module):
         B, C, H, W = h.shape
         v = self.vel_tensor.to(dtype=h.dtype)   # (V,2)
 
-        expected = probs @ v  # (B, 2) -> (dy, dx).    we are taking the mean of velocities weighted by their probabilities
-
+       
+        # so if argmax in used, I am taking the max prob but this is not differentiiable for a parametric velocity. 
+        if use_argmax:
+            max_indices = torch.argmax(probs, dim=1)  # (B,)
+            expected = v[max_indices]  # (B, 2)
+        else:
+            expected = probs @ v  # (B, 2) -> (dy, dx).    we are taking the mean of velocities weighted by their probabilities
+        
         dy = expected[:, 0].view(B, 1, 1)
         dx = expected[:, 1].view(B, 1, 1)
 
@@ -121,9 +127,9 @@ class FERNN_Cell(nn.Module):
             align_corners=True
         )
 
-    def forward(self, f, h, probs=None):
+    def forward(self, f, h, probs=None, use_argmax=False):
 
-        warped_h = self.warp(h, probs)  # (B, hidden, H, W)
+        warped_h = self.warp(h, probs, use_argmax=use_argmax)  # (B, hidden, H, W)
         warped_conv_h = self.conv_h(warped_h) 
         encoded_f = self.conv_u(f) 
         h_next = self.activation(warped_conv_h + encoded_f)
@@ -145,6 +151,8 @@ class Seq2SeqFERNN(nn.Module):
         self.height = height
         self.width = width
         self.output_channels = output_channels or input_channels
+        
+
         # velocity predictor 
         self.velocity_predictor = DiffLucasKanade(v_range=v_range, smooth=smooth_vel_probs)
         
@@ -214,19 +222,20 @@ class Seq2SeqFERNN(nn.Module):
 
             h = self.cell(
                 f_t, h,
-                probs=probs
+                probs=probs,
+                use_argmax= False #not self.training  
             )
 
             if return_vel_probs:
                 vel_probs_list.append(probs)
 
         # Decoder
-        # Important: velocity is computed ONLY from GT target_seq if available.
-        # Otherwise, we freeze velocity to last_probs from the encoder.
+        # Important: velocity is computed from GT target_seq if available.
+        # Otherwise, we can freeze the velocity or we can predict it based on the predictions 
         
-        prev_frame = input_seq[:, -1]  
+        prev_frame = input_seq[:, -1]
+        prev_frame_for_vel = input_seq[:, -1].detach()
         outputs = []
-        prev_pred_for_vel = None
 
         for t in range(pred_len):
             if self.training and (target_seq is not None) and (torch.rand(1).item() < teacher_forcing_ratio):
@@ -234,38 +243,32 @@ class Seq2SeqFERNN(nn.Module):
             else:
                 current_frame = prev_frame.detach()
 
-            # Compute velocity probs for the decoder part stil with GT 
+            # Compute velocity probs
             if target_seq is not None:
                 if t == 0:
-                    # first predicted step: compare target_seq[0] to last input frame
                     f_prev_for_vel = input_seq[:, -1]
                     f_curr_for_vel = target_seq[:, 0]
                 else:
-                    # later: compare target_seq[t] to target_seq[t-1]
                     f_prev_for_vel = target_seq[:, t - 1]
                     f_curr_for_vel = target_seq[:, t]
-
-                # as my velocity model is not parametric,  
                 with torch.no_grad():
                     probs = self.velocity_predictor(f_curr_for_vel, f_prev_for_vel)
-            # if no GT available
             else:
-                if t == 0 or prev_pred_for_vel is None:
+                if t == 0:
                     probs = last_probs
                 else:
                     with torch.no_grad():
-                        probs = self.velocity_predictor(current_frame, prev_pred_for_vel)
+                        probs = self.velocity_predictor(current_frame, prev_frame_for_vel)
 
-            h = self.cell(
-                current_frame, h,
-                probs= probs
-            )
-
+            h = self.cell(current_frame, 
+                          h, 
+                          probs=probs,
+                          use_argmax= False)
             pred = self.decoder(h)
             outputs.append(pred)
 
-            prev_frame = pred  # for autoregressive input 
-            prev_pred_for_vel = pred.detach()  
+            prev_frame_for_vel = current_frame.detach()
+            prev_frame = pred 
 
         outputs_seq = torch.stack(outputs, dim=1)  # (B, pred_len, C, H, W)
 
