@@ -233,38 +233,32 @@ class Seq2SeqFERNN(nn.Module):
             else:
                 current_frame = prev_frame.detach()
 
-            # # -------------------------                  
-            # # Choose velocity probs
-            # # -------------------------
-            # if target_seq is not None:
-            #     # Use ground truth to compute velocity (no drift)
-            #     if t == 0:
-            #         # first predicted step: compare target_seq[0] to last input frame
-            #         f_prev_for_vel = input_seq[:, -1]
-            #         f_curr_for_vel = target_seq[:, 0]
-            #     else:
-            #         # later: compare target_seq[t] to target_seq[t-1]
-            #         f_prev_for_vel = target_seq[:, t - 1]
-            #         f_curr_for_vel = target_seq[:, t]
+            # Compute velocity probs for the decoder part stil with GT if available
+            if target_seq is not None:
+                if t == 0:
+                    # first predicted step: compare target_seq[0] to last input frame
+                    f_prev_for_vel = input_seq[:, -1]
+                    f_curr_for_vel = target_seq[:, 0]
+                else:
+                    # later: compare target_seq[t] to target_seq[t-1]
+                    f_prev_for_vel = target_seq[:, t - 1]
+                    f_curr_for_vel = target_seq[:, t]
 
-            #     with torch.no_grad():
-            #         probs = self.velocity_predictor(f_curr_for_vel, f_prev_for_vel)
-
-            # else:
-            #     # Inference: no GT available -> freeze velocity
-            #     probs = last_probs
-
+                # as my velocity model is not parametric,  
+                with torch.no_grad():
+                    probs = self.velocity_predictor(f_curr_for_vel, f_prev_for_vel)
+            else:
+                probs = last_probs
 
             h = self.cell(
                 current_frame, h,
-                probs= last_probs
+                probs= probs
             )
 
             pred = self.decoder(h)
             outputs.append(pred)
 
-            prev_frame = pred  # for autoregressive input
-
+            prev_frame = pred  # for autoregressive input 
 
         outputs_seq = torch.stack(outputs, dim=1)  # (B, pred_len, C, H, W)
 
