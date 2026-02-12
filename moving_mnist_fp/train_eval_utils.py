@@ -6,7 +6,7 @@ import numpy as np
 from torch.utils.data import DataLoader
 
 
-def train_epoch(model, dataloader, optimizer, criterion, device, input_frames, teacher_forcing_ratio, grad_clip=None):
+def train_epoch(model, dataloader, optimizer, criterion, device, input_frames, teacher_forcing_ratio, grad_clip=None, lambda_warp=0.0):
     model.train()
     running_loss = 0.0
     pbar = tqdm(dataloader, desc="Training", leave=False)
@@ -17,13 +17,26 @@ def train_epoch(model, dataloader, optimizer, criterion, device, input_frames, t
         pred_len = target_seq.size(1)
 
         optimizer.zero_grad() 
-        output_seq = model(
+        output = model(
             input_seq,
             pred_len=pred_len,
             teacher_forcing_ratio=teacher_forcing_ratio,
-            target_seq=target_seq
-        )  # (B, pred_len, C, H, W)
+            target_seq=target_seq,
+            return_warp_loss=(lambda_warp > 0)
+        )
+        
+        # Unpack output
+        if isinstance(output, tuple):
+            output_seq, warp_loss = output
+        else:
+            output_seq = output
+            warp_loss = 0.0
+        
+        # Compute loss
         loss = criterion(output_seq, target_seq)
+        if lambda_warp > 0:
+            loss = loss + lambda_warp * warp_loss
+        
         loss.backward()
         
         # Apply gradient clipping if specified

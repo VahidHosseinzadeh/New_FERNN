@@ -184,7 +184,7 @@ class Seq2SeqFERNNVP(nn.Module):
 
 
     def forward(self, input_seq, pred_len, teacher_forcing_ratio=0.0,
-                target_seq=None, return_vel_probs=False):
+                target_seq=None, return_vel_probs=False, return_warp_loss=False):
         
         B, T_in, C, H, W = input_seq.shape
         device = input_seq.device
@@ -196,6 +196,7 @@ class Seq2SeqFERNNVP(nn.Module):
         )
 
         vel_probs_list = []
+        warp_losses = []
 
         # prob =1 for zero velocity. I define it but it not necessary now because h_0 = 0 so warping does not have effect. 
         def zero_velocity_probs():
@@ -214,9 +215,13 @@ class Seq2SeqFERNNVP(nn.Module):
                 probs = zero_velocity_probs()
             else:
                 f_t_prev = input_seq[:, t - 1]
-
-                # here I am not using no grad as Iam trainig the vel model
                 probs = self.velocity_predictor(f_t, f_t_prev)
+                
+                # Compute warp consistency loss
+                if return_warp_loss:
+                    warped_prev = self.cell.warp(f_t_prev, probs, use_argmax=False)
+                    warp_loss = F.l1_loss(f_t, warped_prev)
+                    warp_losses.append(warp_loss)
 
             last_probs = probs  # store last encoder probs
 
@@ -250,6 +255,12 @@ class Seq2SeqFERNNVP(nn.Module):
                     f_prev_for_vel = target_seq[:, t - 1]
                     f_curr_for_vel = target_seq[:, t]
                 probs = self.velocity_predictor(f_curr_for_vel, f_prev_for_vel)
+                
+                # Compute warp consistency loss
+                if return_warp_loss and t > 0:
+                    warped_prev = self.cell.warp(f_prev_for_vel, probs, use_argmax=False)
+                    warp_loss = F.l1_loss(f_curr_for_vel, warped_prev)
+                    warp_losses.append(warp_loss)
             else:
                 # as we are in the inference phase, we use no grad  
                 with torch.no_grad():
@@ -270,11 +281,20 @@ class Seq2SeqFERNNVP(nn.Module):
             prev_frame = pred 
 
         outputs_seq = torch.stack(outputs, dim=1)  # (B, pred_len, C, H, W)
-
+        
+        results = [outputs_seq]
+        
         if return_vel_probs:
             vel_probs = torch.stack(vel_probs_list, dim=1)  # (B, T_in , num_v)
-            return outputs_seq, vel_probs
-        return outputs_seq
+            results.append(vel_probs)
+        
+        if return_warp_loss:
+            warp_loss = torch.stack(warp_losses).mean() if warp_losses else torch.tensor(0.0, device=device)
+            results.append(warp_loss)
+        
+        if len(results) == 1:
+            return results[0]
+        return tuple(results)
 
 
 
