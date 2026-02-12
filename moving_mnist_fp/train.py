@@ -17,6 +17,8 @@ from train_eval_utils import train_epoch, eval_epoch, eval_len_generalization, e
 def main():
     parser = argparse.ArgumentParser(description="Train & evaluate RNN models on Moving MNIST")
     parser.add_argument('--vel_hidden_channels', type=int, default=16, help='Hidden channels for velocity predictor (only for fernnvp)')
+    parser.add_argument('--lambda_warp', type=float, default=0.0, 
+                    help='Weight for warp consistency loss')
     parser.add_argument('--root', type=str, default='./data')
     parser.add_argument('--seq_len', type=int, default=20)
     parser.add_argument('--input_frames', type=int, default=10)
@@ -261,7 +263,7 @@ def main():
     best_val_losses = float('inf')
     
     for epoch in range(1, args.epochs + 1):
-        train_loss = train_epoch(model, train_loader, optimizer, criterion, device, args.input_frames, args.teacher_forcing_ratio, args.grad_clip)
+        train_loss = train_epoch(model, train_loader, optimizer, criterion, device, args.input_frames, args.teacher_forcing_ratio, args.grad_clip, lambda_warp=args.lambda_warp)
         val_loss = eval_epoch(model, val_loader, criterion, device, args.input_frames, epoch, split_name="val")
         history['train_loss'].append(train_loss)
         history['val_loss'].append(val_loss)
