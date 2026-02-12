@@ -16,6 +16,7 @@ from train_eval_utils import train_epoch, eval_epoch, eval_len_generalization, e
 
 def main():
     parser = argparse.ArgumentParser(description="Train & evaluate RNN models on Moving MNIST")
+    parser.add_argument('--vel_hidden_channels', type=int, default=16, help='Hidden channels for velocity predictor (only for fernnvp)')
     parser.add_argument('--root', type=str, default='./data')
     parser.add_argument('--seq_len', type=int, default=20)
     parser.add_argument('--input_frames', type=int, default=10)
@@ -23,7 +24,7 @@ def main():
     parser.add_argument('--epochs', type=int, default=50)
     parser.add_argument('--min_epochs', type=int, default=50, help='Minimum number of epochs to train')
     parser.add_argument('--lr', type=float, default=1e-3)
-    parser.add_argument('--model', choices=['grnn', 'fernn'], default='fernn')
+    parser.add_argument('--model', choices=['grnn', 'fernn', 'fernnvp'], default='fernn')
     parser.add_argument('--hidden_size', type=int, default=128)
     parser.add_argument('--num_layers', type=int, default=1)
     parser.add_argument('--kernel_size', type=int, default=3)
@@ -178,6 +179,19 @@ def main():
                 u_kernel_size=args.kernel_size,
                 v_range=0,
                 decoder_conv_layers=args.decoder_conv_layers
+            ).to(device)
+    elif args.model == "fernnvp":
+        from parametric_velocity_RNN_model import Seq2SeqFERNNVP
+        model = Seq2SeqFERNNVP(
+                input_channels=1,
+                hidden_channels=args.hidden_size,
+                height=args.image_size,
+                width=args.image_size,
+                h_kernel_size=args.kernel_size,
+                u_kernel_size=args.kernel_size,
+                v_range=args.v_range,
+                decoder_conv_layers=args.decoder_conv_layers,
+                vel_hidden_channels=args.vel_hidden_channels
             ).to(device)
 
     # Load model if specified
