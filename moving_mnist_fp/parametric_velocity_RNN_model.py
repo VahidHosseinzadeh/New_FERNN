@@ -55,7 +55,7 @@ class ParametricVelocityPredictor(nn.Module):
 
 
 
-class FERNN_Cell(nn.Module):
+class FERNN_CellVP(nn.Module):
     def __init__(self, input_channels, hidden_channels,
                  h_kernel_size=3, u_kernel_size=3, v_range=2):
         super().__init__()
@@ -160,7 +160,7 @@ class Seq2SeqFERNNVP(nn.Module):
         
         
         # FERNN Cell
-        self.cell = FERNN_Cell(
+        self.cell = FERNN_CellVP(
             input_channels, hidden_channels,
             h_kernel_size, u_kernel_size, v_range
         )
