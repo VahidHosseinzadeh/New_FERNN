@@ -23,7 +23,7 @@ def main():
     parser.add_argument('--epochs', type=int, default=50)
     parser.add_argument('--min_epochs', type=int, default=50, help='Minimum number of epochs to train')
     parser.add_argument('--lr', type=float, default=1e-3)
-    parser.add_argument('--model', choices=['grnn', 'fernn'], default='fernn')
+    parser.add_argument('--model', choices=['grnn', 'fernn', 'fernn_g'], default='fernn')
     parser.add_argument('--hidden_size', type=int, default=128)
     parser.add_argument('--num_layers', type=int, default=1)
     parser.add_argument('--kernel_size', type=int, default=3)
@@ -92,7 +92,7 @@ def main():
         image_size=args.image_size,
         velocity_range_x=(-args.data_v_range,args.data_v_range),
         velocity_range_y=(-args.data_v_range,args.data_v_range),
-        num_digits=2
+        num_digits=1
     )
 
     gen_test_dataset = MovingMNISTDataset(
@@ -102,7 +102,7 @@ def main():
             image_size=args.image_size,
             velocity_range_x=(-args.data_v_range, args.data_v_range),
             velocity_range_y=(-args.data_v_range, args.data_v_range),
-            num_digits=2,
+            num_digits=1,
             random=False
     )
 
@@ -179,6 +179,17 @@ def main():
                 u_kernel_size=args.kernel_size,
                 v_range=0,
                 pool_type='max',
+                decoder_conv_layers=args.decoder_conv_layers
+            ).to(device)
+    elif args.model == "fernn_g":
+        from algebra_hidden_models import Seq2SeqFERNNg
+        model = Seq2SeqFERNNg(
+                input_channels=1,
+                hidden_channels=args.hidden_size,
+                height=args.image_size,
+                width=args.image_size,
+                h_kernel_size=args.kernel_size,
+                u_kernel_size=args.kernel_size,
                 decoder_conv_layers=args.decoder_conv_layers
             ).to(device)
 
