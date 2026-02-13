@@ -26,7 +26,7 @@ def main():
     parser.add_argument('--epochs', type=int, default=50)
     parser.add_argument('--min_epochs', type=int, default=50, help='Minimum number of epochs to train')
     parser.add_argument('--lr', type=float, default=1e-3)
-    parser.add_argument('--model', choices=['grnn', 'fernn', 'fernnvp'], default='fernn')
+    parser.add_argument('--model', choices=['grnn', 'fernn', 'fernnvp', 'fernng'], default='fernn')
     parser.add_argument('--hidden_size', type=int, default=128)
     parser.add_argument('--num_layers', type=int, default=1)
     parser.add_argument('--kernel_size', type=int, default=3)
@@ -194,6 +194,17 @@ def main():
                 v_range=args.v_range,
                 decoder_conv_layers=args.decoder_conv_layers,
                 vel_hidden_channels=args.vel_hidden_channels
+            ).to(device)
+    elif args.model == "fernng":
+        from algebra_valued_models import Seq2SeqFERNNg
+        model = Seq2SeqFERNNg(
+                input_channels=1,
+                hidden_channels=args.hidden_size,
+                height=args.image_size,
+                width=args.image_size,
+                h_kernel_size=args.kernel_size,
+                u_kernel_size=args.kernel_size,
+                decoder_conv_layers=args.decoder_conv_layers    
             ).to(device)
 
     # Load model if specified
