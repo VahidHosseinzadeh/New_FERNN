@@ -220,14 +220,14 @@ class Seq2SeqFERNNVP(nn.Module):
                 # Compute warp consistency loss
                 if return_warp_loss:
                     warped_prev = self.cell.warp(f_t_prev, probs, use_argmax=False)
-                    warp_loss = F.l1_loss(f_t, warped_prev)
+                    warp_loss = F.mse_loss(f_t, warped_prev)
                     warp_losses.append(warp_loss)
 
-            last_probs = probs  # store last encoder probs
+            last_probs = probs  # store last encoder probs TODO I want to detach the probabilities from the RNN such that the gradient from the loss does not flow back to the velocity predictor in the encoder. I want to update the velocity predictor only based on its own loss, not through the RNN. Is this correct? what is the meaning of this? does that mean that they are two disconnected modules? what about the velcotiy model works in the feature space? 
 
-            h = self.cell(
+            h = self.cell(# detach here. 
                 f_t, h,
-                probs=probs,
+                probs=probs.detach(), #TODO
                 use_argmax= False #not self.training  
             )
 
@@ -259,7 +259,7 @@ class Seq2SeqFERNNVP(nn.Module):
                 # Compute warp consistency loss
                 if return_warp_loss and t > 0:
                     warped_prev = self.cell.warp(f_prev_for_vel, probs, use_argmax=False)
-                    warp_loss = F.l1_loss(f_curr_for_vel, warped_prev)
+                    warp_loss = F.mse_loss(f_curr_for_vel, warped_prev)
                     warp_losses.append(warp_loss)
             else:
                 # as we are in the inference phase, we use no grad  
@@ -271,7 +271,7 @@ class Seq2SeqFERNNVP(nn.Module):
 
             h = self.cell(current_frame, 
                           h, 
-                          probs=probs,
+                          probs=probs.detach(),#TODO 
                           use_argmax= False)
             
             pred = self.decoder(h)
