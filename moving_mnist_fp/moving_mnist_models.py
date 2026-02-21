@@ -101,6 +101,9 @@ class SpecFERNN_Cell(nn.Module):
 
         return warped
 
+    # -------------------------------------------------
+    # 🔁 Forward
+    # -------------------------------------------------
     def forward(self, f, h, u):
         """
         f: (B, C_in, H, W)
@@ -247,3 +250,4 @@ class SpecSeq2SeqFERNN(nn.Module):
             vel_list = torch.stack(vel_list, dim=1)  # (B, T_in, n_modes, 2)
             return outputs_seq, vel_list
         return outputs_seq
+    

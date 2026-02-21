@@ -3,7 +3,7 @@ import torch
 import torch.nn as nn
 from torch.utils.data import DataLoader, random_split, Subset
 from moving_mnist_dataset import MovingMNISTDataset
-from moving_mnist_models import Seq2SeqFERNN
+from moving_mnist_models import SpecSeq2SeqFERNN
 from tqdm import tqdm
 import wandb
 import matplotlib.pyplot as plt
@@ -157,43 +157,22 @@ def main():
     np.random.seed(args.model_seed)
     random.seed(args.model_seed)
     
-    if args.model == "fernn":
-        model = Seq2SeqFERNN(
-                input_channels=1,
-                hidden_channels=args.hidden_size,
-                height=args.image_size,
-                width=args.image_size,
-                h_kernel_size=args.kernel_size,
-                u_kernel_size=args.kernel_size,
-                v_range=args.v_range,
-                decoder_conv_layers=args.decoder_conv_layers
-            ).to(device)
-    elif args.model == "grnn":
-        assert args.v_range == 0, "v_range must be 0 for grnn"
-        model = Seq2SeqFERNN(
-                input_channels=1,
-                hidden_channels=args.hidden_size,
-                height=args.image_size,
-                width=args.image_size,
-                h_kernel_size=args.kernel_size,
-                u_kernel_size=args.kernel_size,
-                v_range=0,
-                decoder_conv_layers=args.decoder_conv_layers
-            ).to(device)
-    elif args.model == "fernnvp":
-        from parametric_velocity_RNN_model import Seq2SeqFERNNVP
-        model = Seq2SeqFERNNVP(
-                input_channels=1,
-                hidden_channels=args.hidden_size,
-                height=args.image_size,
-                width=args.image_size,
-                h_kernel_size=args.kernel_size,
-                u_kernel_size=args.kernel_size,
-                v_range=args.v_range,
-                decoder_conv_layers=args.decoder_conv_layers,
-                vel_hidden_channels=args.vel_hidden_channels
-            ).to(device)
 
+    if args.model == "SpecFERNN":
+        model = SpecSeq2SeqFERNN(
+                input_channels=1,
+                hidden_channels=args.hidden_size,
+                height=args.image_size,
+                width=args.image_size,
+                h_kernel_size=args.kernel_size,
+                u_kernel_size=args.kernel_size,
+                decoder_conv_layers=args.decoder_conv_layers,
+                n_modes=args.vel_hidden_channels,
+                subpixel=False,
+                periodic_bc=True,
+                pool_type='max'
+            ).to(device)
+        
     # Load model if specified
     if args.load_model is not None:
         print(f"Loading model from {args.load_model}")
