@@ -12,3 +12,7 @@ venv/
 wandb/
 runs/
 data/
+media/phase_corr_sample_sequence.gif
+media/phase_corr_batch_sample_0.gif
+output.png
+tests_on_Phase_correlations.ipynb

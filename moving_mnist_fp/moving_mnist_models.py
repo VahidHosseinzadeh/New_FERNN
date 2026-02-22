@@ -64,6 +64,8 @@ class SpecFERNN_Cell(nn.Module):
         dx = u[:, 0].view(-1, 1, 1)
         dy = u[:, 1].view(-1, 1, 1)
 
+
+
         # Create base grid once
         yy, xx = torch.meshgrid(
             torch.arange(H, device=device, dtype=dtype),
@@ -141,7 +143,7 @@ class SpecSeq2SeqFERNN(nn.Module):
 
     def __init__(self, input_channels, hidden_channels, height, width,
                  output_channels=None, h_kernel_size=3, u_kernel_size=3,
-                 decoder_conv_layers=1, n_modes= 2, subpixel=True, periodic_bc=True,pool_type='max'):
+                 decoder_conv_layers=1, n_modes= 2, subpixel=False, periodic_bc=True,pool_type='max'):
         super().__init__()
         self.height = height
         self.width = width
@@ -154,7 +156,9 @@ class SpecSeq2SeqFERNN(nn.Module):
         # velocity predictor 
         self.velocity_predictor = PhaseCorrelation(n_modes=self.n_modes, 
                                                    subpixel=self.subpixel,
-                                                   periodic_bc=self.periodic_bc)
+                                                   periodic_bc=self.periodic_bc,
+                                                   sorting_velocities=False
+                                                   )
         
         # FERNN Cell
         self.cell = SpecFERNN_Cell(
@@ -178,6 +182,39 @@ class SpecSeq2SeqFERNN(nn.Module):
                      padding=1, padding_mode='circular', bias=False)
         )
         self.decoder = nn.Sequential(*decoder_layers)
+        
+    def greedy_match(self, u_prev, u_curr):
+        """
+        u_prev: (B, n_modes, 2)
+        u_curr: (B, n_modes, 2)
+
+        Returns:
+            reordered u_curr (B, n_modes, 2)
+        """
+
+        B, n, _ = u_prev.shape
+        device = u_prev.device
+
+        # Pairwise squared distances
+        # (B, n, n)
+        dist = torch.cdist(u_prev, u_curr, p=2) ** 2
+
+        matched = torch.zeros_like(u_curr)
+        assigned = torch.zeros(B, n, dtype=torch.bool, device=device)
+
+        for i in range(n):
+            # mask already assigned columns
+            masked_dist = dist.clone()
+            masked_dist[assigned.unsqueeze(1).expand(-1, n, -1)] = float('inf')
+
+            # choose nearest for each batch at row i
+            j = masked_dist[:, i].argmin(dim=1)  # (B,)
+
+            matched[:, i] = u_curr[torch.arange(B), j]
+            assigned[torch.arange(B), j] = True
+
+        return matched
+
 
 
     def forward(self, input_seq, pred_len, teacher_forcing_ratio=0.0,
@@ -195,14 +232,39 @@ class SpecSeq2SeqFERNN(nn.Module):
         vel_list = []
 
         # Encoder
+        u_prev = torch.zeros(B, self.n_modes, 2, device=device, dtype=dtype)
+
         for t in range(T_in):
+
             f_t = input_seq[:, t]
-            with torch.no_grad():
-                u = self.velocity_predictor(f_t, input_seq[:, t - 1]) if t > 0 else torch.zeros(B, self.n_modes, 2, device=device, dtype=dtype)
+
+            if t > 0:
+                with torch.no_grad():
+                    u_raw = self.velocity_predictor(input_seq[:, t - 1], f_t)
+
+                u = self.greedy_match(u_prev, u_raw)
+            else:
+                u = torch.zeros_like(u_prev)
+
             h = self.cell(f_t, h, u)
 
+            u_prev = u.detach()
+
             if return_vels:
-                vel_list.append(u)
+                vel_list.append(u_prev)
+
+
+
+        # for t in range(T_in):
+        #     f_t = input_seq[:, t]
+        #     with torch.no_grad():
+        #         u = self.velocity_predictor(input_seq[:, t - 1], f_t) if t > 0 else torch.zeros(B, self.n_modes, 2, device=device, dtype=dtype)
+        #     h = self.cell(f_t, h, u)
+
+            
+
+
+
 
         # Decoder
         # Important: velocity is computed from GT target_seq if available.        
@@ -223,12 +285,15 @@ class SpecSeq2SeqFERNN(nn.Module):
                     f_prev_for_vel = target_seq[:, t - 1]
                     f_curr_for_vel = target_seq[:, t]
                 with torch.no_grad():
-                    u = self.velocity_predictor(f_curr_for_vel, f_prev_for_vel)
+                    u_raw = self.velocity_predictor(f_prev_for_vel, f_curr_for_vel)
+
+                u = self.greedy_match(u, u_raw)
             
 
-
+            
             h = self.cell(current_frame, h, u)
-                        
+            
+            
             # pool over modes
             if self.pool_type == 'max':
                 feat = h.max(1)[0]

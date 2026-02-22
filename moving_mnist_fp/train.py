@@ -16,7 +16,8 @@ from train_eval_utils import train_epoch, eval_epoch, eval_len_generalization, e
 
 def main():
     parser = argparse.ArgumentParser(description="Train & evaluate RNN models on Moving MNIST")
-    parser.add_argument('--vel_hidden_channels', type=int, default=16, help='Hidden channels for velocity predictor (only for fernnvp)')
+    parser.add_argument('--num_digits', type=int, default=1, help='Number of digits in each sequence')
+    parser.add_argument('--n_modes', type=int, default=2, help='Number of modes for specfernn')
     parser.add_argument('--root', type=str, default='./data')
     parser.add_argument('--seq_len', type=int, default=20)
     parser.add_argument('--input_frames', type=int, default=10)
@@ -24,7 +25,7 @@ def main():
     parser.add_argument('--epochs', type=int, default=50)
     parser.add_argument('--min_epochs', type=int, default=50, help='Minimum number of epochs to train')
     parser.add_argument('--lr', type=float, default=1e-3)
-    parser.add_argument('--model', choices=['grnn', 'fernn', 'fernnvp'], default='fernn')
+    parser.add_argument('--model', choices=['fernn', 'specfernn'], default='specfernn')
     parser.add_argument('--hidden_size', type=int, default=128)
     parser.add_argument('--num_layers', type=int, default=1)
     parser.add_argument('--kernel_size', type=int, default=3)
@@ -83,7 +84,7 @@ def main():
         image_size=args.image_size,
         velocity_range_x=(-args.data_v_range,args.data_v_range),
         velocity_range_y=(-args.data_v_range,args.data_v_range),
-        num_digits=1
+        num_digits=args.num_digits,
     )
     
     test_dataset = MovingMNISTDataset(
@@ -93,7 +94,7 @@ def main():
         image_size=args.image_size,
         velocity_range_x=(-args.data_v_range,args.data_v_range),
         velocity_range_y=(-args.data_v_range,args.data_v_range),
-        num_digits=1
+        num_digits=args.num_digits
     )
 
     gen_test_dataset = MovingMNISTDataset(
@@ -103,7 +104,7 @@ def main():
             image_size=args.image_size,
             velocity_range_x=(-args.data_v_range, args.data_v_range),
             velocity_range_y=(-args.data_v_range, args.data_v_range),
-            num_digits=1,
+            num_digits=args.num_digits,
             random=False
     )
 
@@ -158,7 +159,7 @@ def main():
     random.seed(args.model_seed)
     
 
-    if args.model == "SpecFERNN":
+    if args.model == "specfernn":
         model = SpecSeq2SeqFERNN(
                 input_channels=1,
                 hidden_channels=args.hidden_size,
@@ -167,7 +168,7 @@ def main():
                 h_kernel_size=args.kernel_size,
                 u_kernel_size=args.kernel_size,
                 decoder_conv_layers=args.decoder_conv_layers,
-                n_modes=args.vel_hidden_channels,
+                n_modes=args.n_modes,
                 subpixel=False,
                 periodic_bc=True,
                 pool_type='max'

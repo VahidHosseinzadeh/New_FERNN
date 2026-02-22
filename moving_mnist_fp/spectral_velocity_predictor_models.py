@@ -9,7 +9,8 @@ class PhaseCorrelation(nn.Module):
                  periodic_bc=True,
                  subpixel=True,
                  pad_factor=1,
-                 eps=1e-8):
+                 eps=1e-8,
+                 sorting_velocities=True):
         super().__init__()
 
         self.n_modes = n_modes
@@ -17,7 +18,8 @@ class PhaseCorrelation(nn.Module):
         self.subpixel = subpixel
         self.pad_factor = pad_factor
         self.eps = eps
-
+        self.sorting_velocities = sorting_velocities
+        
     def _parabolic_subpixel(self, corr, y, x):
         """
         corr: (B, H, W)
@@ -77,14 +79,13 @@ class PhaseCorrelation(nn.Module):
             frame_next = frame_next[:, 0]
 
         # Batched FFT
-        F0 = torch.fft.fft2(frame_prev, s=(H_pad, W_pad))
-        F1 = torch.fft.fft2(frame_next, s=(H_pad, W_pad))
+        F0 = torch.fft.rfft2(frame_prev, s=(H_pad, W_pad))
+        F1 = torch.fft.rfft2(frame_next, s=(H_pad, W_pad))
 
         R = F0 * torch.conj(F1)
         R = R / (torch.abs(R) + self.eps)
 
-        corr = torch.fft.ifft2(R)
-        corr = torch.abs(corr)  # (B, H_pad, W_pad)
+        corr = torch.fft.irfft2(R, s=(H_pad, W_pad))
 
         # Flatten spatial dimensions
         corr_flat = corr.view(B, -1)
@@ -115,6 +116,24 @@ class PhaseCorrelation(nn.Module):
         vy = -y
 
         velocities = torch.stack([vx, vy], dim=2)
+
+        
+        if self.sorting_velocities:
+            # here we order the velocities by speed, then vx, then vy. this removes the mode ordering ambiguity when we go from a time to time at least for n_modes=2. 
+            speed = velocities.pow(2).sum(dim=2)  # (B, n_modes)
+            vx = velocities[..., 0]
+            vy = velocities[..., 1]
+
+            # Combined lexicographic key
+            key = speed * 1e4 + vx * 1e2 + vy
+
+            idx = torch.argsort(key, dim=1)
+
+            velocities = torch.gather(
+                velocities,
+                1,
+                idx.unsqueeze(-1).expand(-1, -1, 2)
+            )
 
         return velocities
 
