@@ -12,3 +12,4 @@ venv/
 wandb/
 runs/
 data/
+media/
