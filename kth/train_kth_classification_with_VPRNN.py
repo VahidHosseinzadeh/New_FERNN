@@ -388,233 +388,368 @@ class Video3DCNNClassifier(nn.Module):
         return self._n_params
 
 
-# ──────────────────────────────────────────────────────────────
-#  FERNN
-# ──────────────────────────────────────────────────────────────
-class FERNN(nn.Module):
-    """
-    Flow Equivariant Recurrent Neural Network
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
 
-    v_list: list of (vy, vx) pairs for which the network is equivariant. 
-            Setting to [(0,0)] means the network is not equivariant (G-RNN).
-    """
-    def __init__(self, input_channels, hidden_channels, kernel_size, num_layers=1, v_list=[(0,0)]):
-        super(FERNN, self).__init__()
-        padding = kernel_size // 2
-        self.hidden_channels = hidden_channels
-        self.v_list = v_list
-        self.num_v = len(v_list)
-        self.num_layers = num_layers
 
-        # Create shift kernels for each velocity
-        self.register_buffer('shift_kernels', self._create_shift_kernels(kernel_size))
+# the phase correlation mdoel 
+class PhaseCorrelation(nn.Module):
+    def __init__(self,
+                 n_modes=2,
+                 periodic_bc=True,
+                 subpixel=True,
+                 pad_factor=1,
+                 eps=1e-8
+                 ):
+        
+        super().__init__()
+        self.n_modes = n_modes
+        self.periodic_bc = periodic_bc
+        self.subpixel = subpixel
+        self.pad_factor = pad_factor
+        self.eps = eps
+    def _parabolic_subpixel(self, corr, y, x):
+        """
+        corr: (B, H, W)
+        y, x: (B, n_modes)
+        returns dy, dx of shape (B, n_modes)
+        """
+        B, H, W = corr.shape
 
-        # First layer processes input channels
-        self.conv_u_first = nn.Sequential(
-            nn.Conv2d(input_channels, 32, 5, 1, 2, bias=False), 
-            nn.BatchNorm2d(32),
-            nn.ReLU(inplace=True), 
-            nn.Conv2d(32, 64, 3, 1, 1, bias=False), 
-            nn.BatchNorm2d(64),
-            nn.ReLU(inplace=True), 
-            nn.Conv2d(64, hidden_channels, 3, 1, 1, bias=False), 
-            nn.BatchNorm2d(hidden_channels),
-            nn.ReLU(inplace=True), 
+        batch_idx = torch.arange(B, device=corr.device)[:, None]
+
+        xm1 = (x - 1) % W
+        xp1 = (x + 1) % W
+        ym1 = (y - 1) % H
+        yp1 = (y + 1) % H
+
+        c = corr[batch_idx, y, x]
+
+        c_xm1 = corr[batch_idx, y, xm1]
+        c_xp1 = corr[batch_idx, y, xp1]
+        denom_x = c_xm1 - 2 * c + c_xp1
+        dx = torch.where(
+            torch.abs(denom_x) < 1e-12,
+            torch.zeros_like(denom_x),
+            0.5 * (c_xm1 - c_xp1) / denom_x
         )
 
-        # Subsequent layers process hidden_channels * num_v channels
+        c_ym1 = corr[batch_idx, ym1, x]
+        c_yp1 = corr[batch_idx, yp1, x]
+        denom_y = c_ym1 - 2 * c + c_yp1
+        dy = torch.where(
+            torch.abs(denom_y) < 1e-12,
+            torch.zeros_like(denom_y),
+            0.5 * (c_ym1 - c_yp1) / denom_y
+        )
+
+        return dy, dx
+    
+
+    def forward(self, seq):
+        """
+        seq: (B, T, C, H, W)
+
+        Returns:
+            velocities: (B, n_modes, 2)
+        """
+
+        B, T, C, H, W = seq.shape
+        H_pad = H * self.pad_factor
+        W_pad = W * self.pad_factor
+
+        if C > 1:
+            seq = seq.mean(dim=2)
+        else:
+            seq = seq[:, :, 0]  # (B, T, H, W)
+
+        F_seq = torch.fft.rfft2(seq, s=(H_pad, W_pad))
+        # shape: (B, T, H_pad, W_pad//2+1)
+
+        # for all the sequence pairs, 
+        F_prev = F_seq[:, :-1]
+        F_next = F_seq[:, 1:]
+
+        R = F_prev * torch.conj(F_next)
+        R = R / (torch.abs(R) + self.eps)
+
+        R_sum = R.sum(dim=1)   # (B, H_pad, W_pad//2+1)
+
+        corr_sum = torch.fft.irfft2(R_sum, s=(H_pad, W_pad))
+        # (B, H_pad, W_pad)
+
+        corr_flat = corr_sum.view(B, -1)
+        top_vals, topk_idx = torch.topk(corr_flat, self.n_modes, dim=1)
+
+        y0 = topk_idx // W_pad
+        x0 = topk_idx % W_pad
+
+        y = y0.float()
+        x = x0.float()
+
+        # Subpixel refinement
+        if self.subpixel:
+            dy, dx = self._parabolic_subpixel(corr_sum, y0, x0)
+            y = y + dy
+            x = x + dx
+
+        # Periodic wrap correction
+        if self.periodic_bc:
+            x = torch.where(x > W_pad / 2, x - W_pad, x)
+            y = torch.where(y > H_pad / 2, y - H_pad, y)
+
+        # Convert shift → velocity
+        vx = -x
+        vy = -y
+        velocities = torch.stack([vx, vy], dim=2)
+
+
+        return velocities, top_vals # (B, n_modes, 2) for velocity, (B, n_modes) for confidence
+
+
+
+class FERNN_VP(nn.Module):
+
+    def __init__(self, input_channels, hidden_channels,
+                 kernel_size, n_modes,
+                 num_layers=1):
+
+        super().__init__()
+
+        padding = kernel_size // 2
+        self.hidden_channels = hidden_channels
+        self.n_modes = n_modes
+        self.num_layers = num_layers
+
+        # Input processing
+        self.conv_u_first = nn.Sequential(
+            nn.Conv2d(input_channels, 32, 5, 1, 2, bias=False),
+            nn.BatchNorm2d(32),
+            nn.ReLU(inplace=True),
+            nn.Conv2d(32, 64, 3, 1, 1, bias=False),
+            nn.BatchNorm2d(64),
+            nn.ReLU(inplace=True),
+            nn.Conv2d(64, hidden_channels, 3, 1, 1, bias=False),
+            nn.BatchNorm2d(hidden_channels),
+            nn.ReLU(inplace=True),
+        )
+
         self.conv_u_layers = nn.ModuleList([
             nn.Sequential(
                 nn.Conv2d(hidden_channels, hidden_channels, 3, 1, 1, bias=False),
                 nn.BatchNorm2d(hidden_channels),
                 nn.ReLU(inplace=True)
-            ) for _ in range(num_layers - 1)
+            )
+            for _ in range(num_layers - 1)
         ])
 
-        # Hidden state processing layers
         self.conv_h_layers = nn.ModuleList([
-            nn.Sequential(
-                nn.Conv2d(hidden_channels, hidden_channels, kernel_size, padding=padding, bias=False, padding_mode='circular')
-            ) for _ in range(num_layers)
+            nn.Conv2d(
+                hidden_channels,
+                hidden_channels,
+                kernel_size,
+                padding=padding,
+                padding_mode='circular',
+                bias=False
+            )
+            for _ in range(num_layers)
         ])
 
         self.activation = nn.Tanh()
 
-    def _create_shift_kernels(self, kernel_size):
-        # Create a kernel for each velocity that will perform the shift operation
-        max_shift = max(max(abs(vx) for _, vx in self.v_list), max(abs(vy) for vy, _ in self.v_list))
-        kernel_size = max_shift * 2 + 1
-        shift_kernels = torch.zeros(self.num_v, 1, kernel_size, kernel_size)
-        
-        for i, (vy, vx) in enumerate(self.v_list):
-            # Place 1 at the position that will create the desired shift
-            shift_kernels[i, 0, kernel_size//2 + vy, kernel_size//2 + vx] = 1.0
-            
-        return shift_kernels
 
-    def _process_layer(self, h, u_t, layer_idx):
-        """Process a single layer of the RNN."""
-        batch_size = h.size(0)
-        height, width = h.size(-2), h.size(-1)
-        
-        # Reshape h to separate velocity groups
-        h_reshaped = h.view(batch_size, self.num_v, self.hidden_channels, height, width)
-        
-        # Reshape for group convolution
-        h_reshaped = h_reshaped.transpose(1, 2)
-        h_reshaped = h_reshaped.reshape(-1, self.num_v, height, width)
-        
-        # Add circular padding
-        pad_size = self.shift_kernels.size(-1)//2
-        h_padded = F.pad(h_reshaped, (pad_size, pad_size, pad_size, pad_size), mode='circular')
-        
-        # Apply velocity shifts using convolution
-        h_shifted = F.conv2d(
-            h_padded,
-            self.shift_kernels,
-            padding=0,
-            groups=self.num_v
+    # Warp per velocity mode    
+    def warp(self, h, v):
+        """
+        h: (B, n_modes, C, H, W)
+        v: (B, n_modes, 2)
+        """
+
+        B, n_modes, C, H, W = h.shape
+        device = h.device
+        dtype = h.dtype
+
+        h = h.view(B * n_modes, C, H, W)
+        v = v.reshape(B * n_modes, 2)
+
+        dx = v[:, 0].view(-1, 1, 1)
+        dy = v[:, 1].view(-1, 1, 1)
+
+        yy, xx = torch.meshgrid(
+            torch.arange(H, device=device, dtype=dtype),
+            torch.arange(W, device=device, dtype=dtype),
+            indexing="ij"
         )
-        
-        # Reshape back to original dimensions
-        h_shifted = h_shifted.view(batch_size, self.hidden_channels, self.num_v, height, width)
-        h_shifted = h_shifted.transpose(1, 2)
-        h_shifted = h_shifted.reshape(batch_size * self.num_v, self.hidden_channels, height, width)
-        
-        # Process input for this layer
+
+        yy = yy.unsqueeze(0).expand(B * n_modes, -1, -1)
+        xx = xx.unsqueeze(0).expand(B * n_modes, -1, -1)
+
+        yy = yy - dy
+        xx = xx - dx
+
+        yy = torch.remainder(yy, H)
+        xx = torch.remainder(xx, W)
+
+        yy = (yy / (H - 1)) * 2 - 1
+        xx = (xx / (W - 1)) * 2 - 1
+
+        grid = torch.stack([xx, yy], dim=-1)
+
+        warped = F.grid_sample(
+            h,
+            grid,
+            mode="bilinear",
+            padding_mode="border",
+            align_corners=True
+        )
+
+        return warped.view(B, n_modes, C, H, W)
+
+
+    def _process_layer(self, h, u_t, v_t, layer_idx):
+
+        B, n_modes, C, H, W = h.shape
+
+        # 🔥 Continuous warp instead of shift kernel
+        h_shifted = self.warp(h, v_t)
+
+        h_shifted = h_shifted.view(B * n_modes, C, H, W)
+        h_conv = self.conv_h_layers[layer_idx](h_shifted)
+        h_conv = h_conv.view(B, n_modes, C, H, W)
+
         if layer_idx == 0:
-            u_processed = self.conv_u_first(u_t).view(batch_size, 1, self.hidden_channels, height, width).repeat(1, self.num_v, 1, 1, 1) 
+            u_processed = self.conv_u_first(u_t)
+            u_processed = u_processed.unsqueeze(1).expand(-1, n_modes, -1, -1, -1)
         else:
-            # For subsequent layers, process the previous layer's output
-            u_t_reshaped = u_t.view(batch_size * self.num_v, self.hidden_channels, height, width)
-            u_processed = self.conv_u_layers[layer_idx-1](u_t_reshaped)
-            u_processed = u_processed.view(batch_size, self.num_v, self.hidden_channels, height, width)
-        
-        # Update hidden state
-        h_new = self.activation(
-            u_processed
-            + self.conv_h_layers[layer_idx](h_shifted).view(batch_size, self.num_v, self.hidden_channels, height, width)
-        )
-        
+            u_prev = u_t.view(B * n_modes, C, H, W)
+            u_processed = self.conv_u_layers[layer_idx - 1](u_prev)
+            u_processed = u_processed.view(B, n_modes, C, H, W)
+
+        h_new = self.activation(h_conv + u_processed)
+
         return h_new
 
-    def forward(self, u):
-        batch_size, time_steps, channels, in_height, in_width = u.size()
-        height, width = in_height, in_width
-        
-        # Initialize hidden states for all layers
-        h_layers = [torch.zeros(batch_size, self.num_v, self.hidden_channels, height, width, device=u.device) 
-                   for _ in range(self.num_layers)]
-        
+
+    def forward(self, u, velocities):
+        """
+        u: (B, T, C, H, W)
+        velocities: (B, n_modes, 2)
+        """
+
+        B, T, C, H, W = u.shape
+
+        h_layers = [
+            torch.zeros(B, self.n_modes, self.hidden_channels, H, W,
+                        device=u.device)
+            for _ in range(self.num_layers)
+        ]
+
         outputs = []
 
-        for t in range(time_steps):
+        for t in range(T):
+
             u_t = u[:, t]
-            
-            # Process each layer
+            v_t = velocities  
+
             for layer_idx in range(self.num_layers):
-                h_layers[layer_idx] = self._process_layer(h_layers[layer_idx], 
-                                                        u_t if layer_idx == 0 else h_layers[layer_idx-1],
-                                                        layer_idx)
-            
-            # Use output from last layer
-            out = h_layers[-1].view(batch_size, self.num_v, self.hidden_channels, height, width)
-            out = out.permute(1, 0, 2, 3, 4)
+                h_layers[layer_idx] = self._process_layer(
+                    h_layers[layer_idx],
+                    u_t if layer_idx == 0 else h_layers[layer_idx - 1],
+                    v_t,
+                    layer_idx
+                )
+
+            out = h_layers[-1].permute(1, 0, 2, 3, 4)
             outputs.append(out.unsqueeze(2))
 
         outputs = torch.cat(outputs, dim=2)
         return outputs
+    
 
 
-class GRNN_Plus(FERNN):
-    def __init__(self, input_channels, hidden_channels, kernel_size, num_layers=1, v_list=[(0,0)]):
-        super(GRNN_Plus, self).__init__(input_channels, hidden_channels, kernel_size, num_layers, v_list)
-        # Replace shift kernels with learned kernels
-        max_shift = max(max(abs(vx) for _, vx in self.v_list), max(abs(vy) for vy, _ in self.v_list))
-        kernel_size = max_shift * 2 + 1
-        
-        # Initialize learned kernels with Kaiming initialization (same as nn.Conv2d default)
-        self.learned_kernels = nn.Parameter(torch.zeros(self.num_v, 1, kernel_size, kernel_size))
-        # Initialize each kernel separately since they are used in group convolution
-        for i in range(self.num_v):
-            nn.init.kaiming_normal_(self.learned_kernels[i:i+1], mode='fan_out', nonlinearity='linear')
-        
-        # Remove the shift_kernels buffer since we're using learned_kernels
-        delattr(self, 'shift_kernels')
-
-    def _process_layer(self, h, u_t, layer_idx):
-        """Process a single layer of the RNN."""
-        batch_size = h.size(0)
-        height, width = h.size(-2), h.size(-1)
-        
-        # Reshape h to separate velocity groups
-        h_reshaped = h.view(batch_size, self.num_v, self.hidden_channels, height, width)
-        
-        # Reshape for group convolution
-        h_reshaped = h_reshaped.transpose(1, 2)
-        h_reshaped = h_reshaped.reshape(-1, self.num_v, height, width)
-        
-        # Add circular padding
-        pad_size = self.learned_kernels.size(-1)//2
-        h_padded = F.pad(h_reshaped, (pad_size, pad_size, pad_size, pad_size), mode='circular')
-        
-        # Apply learned kernels using convolution
-        h_shifted = F.conv2d(
-            h_padded,
-            self.learned_kernels,
-            padding=0,
-            groups=self.num_v
-        )
-        
-        # Reshape back to original dimensions
-        h_shifted = h_shifted.view(batch_size, self.hidden_channels, self.num_v, height, width)
-        h_shifted = h_shifted.transpose(1, 2)
-        h_shifted = h_shifted.reshape(batch_size * self.num_v, self.hidden_channels, height, width)
-        
-        # Process input for this layer
-        if layer_idx == 0:
-            u_processed = self.conv_u_first(u_t).view(batch_size, 1, self.hidden_channels, height, width).repeat(1, self.num_v, 1, 1, 1) 
-        else:
-            # For subsequent layers, process the previous layer's output
-            u_t_reshaped = u_t.view(batch_size * self.num_v, self.hidden_channels, height, width)
-            u_processed = self.conv_u_layers[layer_idx-1](u_t_reshaped)
-            u_processed = u_processed.view(batch_size, self.num_v, self.hidden_channels, height, width)
-        
-        # Update hidden state
-        h_new = self.activation(
-            u_processed
-            + self.conv_h_layers[layer_idx](h_shifted).view(batch_size, self.num_v, self.hidden_channels, height, width)
-        )
-        
-        return h_new
 
 
-class FERNN_Classifier(nn.Module):
-    def __init__(self, input_size, hidden_size, hidden_channels, num_patterns, v_list=[(0,0)], num_layers=1, use_fake_rnn=False):
-        super(FERNN_Classifier, self).__init__()
+
+import torch
+import torch.nn as nn
+
+
+class FERNN_VP_Classifier(nn.Module):
+    def __init__(
+        self,
+        input_size,
+        hidden_size,
+        hidden_channels,
+        num_patterns,
+        n_modes,
+        num_layers=1,
+         ):
+        super(FERNN_VP_Classifier, self).__init__()
+
         self.hidden_size = hidden_size
         self.hidden_channels = hidden_channels
-        rnn_class = GRNN_Plus if use_fake_rnn else FERNN
-        self.lstm = rnn_class(input_channels=1, hidden_channels=self.hidden_channels, kernel_size=3, v_list=v_list, num_layers=num_layers)
-        self.pool = nn.AdaptiveAvgPool2d((1,1))
+        self.n_modes = n_modes
+
+        self.velocity_predictor = PhaseCorrelation(n_modes=n_modes,
+                                                   periodic_bc=True,
+                                                  subpixel=True,
+                                                  pad_factor=1)
+
+
+       
+
+        self.lstm = FERNN_VP(
+            input_channels=1,
+            hidden_channels=self.hidden_channels,
+            kernel_size=3,
+            n_modes=n_modes,
+            num_layers=num_layers
+        )
+
+
+        self.pool = nn.AdaptiveAvgPool2d((1, 1))
         self.fc = nn.Linear(self.hidden_channels, num_patterns)
-       # convenient parameter counter
+
         self._n_params = sum(p.numel() for p in self.parameters())
 
     def forward(self, x):
-        rnn_out = self.lstm(x)
+        """
+        x: (B, T, 1, H, W)
+        """
+
+        velocities, _ = self.velocity_predictor(x)
+        # expected shape: (B, T, n_modes, 2)
+
+        rnn_out = self.lstm(x, velocities)
+        # shape: (n_modes, B, T, C, H, W)
+
+
         out = torch.clone(rnn_out)
-        out = out.max(0, keepdim=False)[0]
-        out = out[:, -1]
-        out = self.pool(out)
+
+        # Max over velocity modes
+        out = out.max(0, keepdim=False)[0]  # (B, T, C, H, W)
+
+        # Take last time step
+        out = out[:, -1]                   # (B, C, H, W)
+
+        # Spatial pooling
+        out = self.pool(out)               # (B, C, 1, 1)
+
         out = out.reshape(out.shape[0], -1)
+
+        # Final classifier
         out = self.fc(out)
+
         return out
+
 
     def count_parameters(self, verbose=True):
         if verbose:
             print(f"Total trainable parameters: {self._n_params/1e6:.2f} M")
         return self._n_params
+    
+
 
 
 # ===========================================================================
@@ -727,9 +862,10 @@ def main():
     parser.add_argument("--wandb_entity", type=str, default="ENTITY", help="Wandb entity name")
     parser.add_argument("--run_name", type=str, default=None, help="Wandb run name")
     parser.add_argument("--wandb_dir", type=str, default="./tmp/", help="Directory for wandb files")
-    parser.add_argument("--model", type=str, default="fernn", choices=["fernn", "grnn", "grnn_plus", "3dcnn"], help="Model to use")
+    parser.add_argument("--model", type=str, default="fernn", choices=["fernn", "fernn_vp", "grnn", "grnn_plus", "3dcnn"], help="Model to use")
     parser.add_argument("--v_gen_test", action="store_true", help="Run velocity generalization test sets")
     parser.add_argument("--vx_gen_test", action="store_true", help="Run velocity generalization test sets for x translation")
+    parser.add_argument("--n_modes", type=int, default=2, help="Number of velocity modes for FERNN_VP")
 
 
     args = parser.parse_args()
@@ -899,6 +1035,15 @@ def main():
             num_layers=args.num_rnn_layers,
             use_fake_rnn=args.use_fake_rnn
         )
+    elif args.model == "fernn_vp":
+        model = FERNN_VP_Classifier(
+            input_size=args.height, 
+            hidden_size=args.height*args.width, 
+            hidden_channels=128*args.channel_multiplier, 
+            num_patterns=6, 
+            n_modes=args.n_modes,
+            num_layers=args.num_rnn_layers
+        )
     elif args.model == "grnn":
         assert args.vx_range == 0 and args.vy_range == 0, "vx_range and vy_range must be 0 for grnn"
         model = FERNN_Classifier(
@@ -937,7 +1082,6 @@ def main():
     if args.wandb:
         wandb.init(
             project=args.wandb_project,
-            # entity=args.wandb_entity,
             name=args.run_name,
             dir=args.wandb_dir,
             config=vars(args)
